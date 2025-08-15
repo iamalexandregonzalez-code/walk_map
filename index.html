@@ -14,7 +14,7 @@
     .toolbar button, .toolbar label.btn { appearance: none; border:1px solid rgba(255,255,255,.12); background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)); color:#e8eef7; padding:.45rem .7rem; border-radius:10px; font-size:.9rem; cursor:pointer; }
     .toolbar button:active, .toolbar label.btn:active { transform: translateY(1px); }
     .toolbar input[type="file"] { display:none; }
-    .toolbar input.search { min-width:220px; max-width:260px; border:1px solid rgba(255,255,255,.12); background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)); color:inherit; padding:.42rem .5rem; border-radius:10px; font-size:.9rem; }
+    .toolbar input.search, .toolbar input.url { min-width:220px; max-width:260px; border:1px solid rgba(255,255,255,.12); background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)); color:inherit; padding:.42rem .5rem; border-radius:10px; font-size:.9rem; }
     .toolbar input[type="date"] { border:1px solid rgba(255,255,255,.12); background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)); color:inherit; padding:.42rem .5rem; border-radius:10px; font-size:.9rem; }
     .stat { font-size:.8rem; opacity:.85; padding:.2rem .45rem; border:1px solid rgba(255,255,255,.08); border-radius:8px; }
     .progress { display:none; align-items:center; gap:.5rem; font-size:.85rem; }
@@ -26,10 +26,34 @@
     .suggestions .item:hover{ background: rgba(255,255,255,.08); }
     body.light .suggestions{ background: rgba(255,255,255,.95); border-color: rgba(0,0,0,.15); }
     body.light .suggestions .item:hover{ background: rgba(0,0,0,.06); }
+      /* Mobile menu & stats */
+    .menu-btn{ position:fixed; bottom:calc(env(safe-area-inset-bottom, 0px) + 3.2rem); right:calc(env(safe-area-inset-right, 0px) + .75rem); top:auto; left:auto; z-index:1100; appearance:none; border:1px solid rgba(255,255,255,.12); background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)); color:inherit; padding:.42rem .6rem; border-radius:10px; font-size:1.05rem; cursor:pointer; }
+    .scrim{ position:fixed; inset:0; background:rgba(0,0,0,.35); backdrop-filter: blur(2px); z-index:900; }
+    .scrim[hidden]{ display:none; }
+    .stats-bar{ position:fixed; left:0; right:0; bottom:0; z-index:1000; display:flex; gap:.5rem; justify-content:center; align-items:center; flex-wrap:wrap; padding:.4rem .5rem; border-top:1px solid rgba(255,255,255,.1); background: rgba(5,8,12,.65); }
+    body.light .stats-bar{ background: rgba(255,255,255,.75); border-top-color: rgba(0,0,0,.12); }
+
+    @media (max-width: 800px){
+      .toolbar{ display:none; position:fixed; left:.75rem; right:.75rem; top:3.25rem; transform:none; flex-direction:column; align-items:stretch; gap:.5rem; padding:.6rem; z-index:1001; }
+      body.menu-open .toolbar{ display:flex; }
+      body.menu-open #scrim{ display:block; }
+    }
   </style>
 </head>
 <body>
   <div id="map"></div>
+
+  <button id="menu-btn" class="menu-btn" aria-label="Menu">☰</button>
+  <div id="scrim" class="scrim" hidden></div>
+
+  <div id="stats-bar" class="stats-bar">
+    <span class="stat" id="count">0 trajets</span>
+    <span class="stat" id="points">0 points</span>
+    <span class="stat" id="kmvis">0 km visibles</span>
+    <span class="stat" id="avgspd">— km/h</span>
+    <span class="stat" id="selstat">Sélection : —</span>
+    <div class="progress" id="progress" aria-busy="false"><span id="progmsg">Prêt</span></div>
+  </div>
 
   <div class="toolbar">
     <label class="btn" for="file-input">📥 Importer GPX / TCX / JSON</label>
@@ -37,8 +61,12 @@
 
     <button id="clear-btn" title="Effacer tout">🧹 Effacer</button>
     <button id="export-file-btn" title="Exporter en fichier">⬇️ Export</button>
+
     <label class="btn" for="import-file-input" title="Importer un snapshot depuis un fichier">⬆️ Import</label>
     <input id="import-file-input" type="file" accept=".json,application/json" />
+
+    <input id="import-url" class="url" type="url" placeholder="URL snapshot JSON" inputmode="url" />
+    <button id="import-url-btn" title="Importer via URL">🌐 Import URL</button>
 
     <button id="theme-btn" title="Basculer clair/sombre">☀️/🌙</button>
 
@@ -46,13 +74,6 @@
 
     <input id="dateStart" type="date" title="Date de début" />
     <input id="dateEnd" type="date" title="Date de fin" />
-
-    <span class="stat" id="count">0 trajets</span>
-    <span class="stat" id="points">0 points</span>
-    <span class="stat" id="kmvis">0 km visibles</span>
-    <span class="stat" id="avgspd">— km/h</span>
-    <span class="stat" id="selstat">Sélection : —</span>
-    <div class="progress" id="progress" aria-busy="false"><span id="progmsg">Import...</span></div>
   </div>
 
   <div id="geo-suggest" class="suggestions" hidden></div>
@@ -78,10 +99,43 @@
       scheduleRedraw();
     });
 
+    // Double-tap zoom (mobile)
+    (function(){
+      var cont = map.getContainer();
+      var lastTap = 0, lastX=0, lastY=0;
+      cont.addEventListener('touchend', function(ev){
+        if(ev.touches && ev.touches.length) return;
+        var t = ev.changedTouches && ev.changedTouches[0]; if(!t) return;
+        var now = Date.now(), dt = now - lastTap, dx=t.clientX-lastX, dy=t.clientY-lastY;
+        if(dt>0 && dt<280 && Math.hypot(dx,dy)<20){
+          var rect = cont.getBoundingClientRect();
+          var pt = L.point(t.clientX-rect.left, t.clientY-rect.top);
+          var ll = map.containerPointToLatLng(pt);
+          map.setZoomAround(ll, map.getZoom()+1);
+          lastTap = 0; lastX = lastY = 0; return;
+        }
+        lastTap = now; lastX=t.clientX; lastY=t.clientY;
+      }, {passive:true});
+    })();
+
     // ==========================
     //  Outils UI
     // ==========================
     function toast(msg){ var el=document.createElement('div'); el.textContent=msg; el.style.position='fixed'; el.style.left='50%'; el.style.transform='translateX(-50%)'; el.style.bottom='90px'; el.style.zIndex=2000; el.style.background='rgba(5,8,12,.85)'; el.style.color='#e8eef7'; el.style.border='1px solid rgba(255,255,255,.12)'; el.style.padding='.5rem .75rem'; el.style.borderRadius='12px'; el.style.boxShadow='0 8px 24px rgba(0,0,0,.35)'; document.body.appendChild(el); setTimeout(function(){ el.remove(); }, 1800); }
+
+    // Burger menu toggle
+    (function(){
+      var btn = document.getElementById('menu-btn');
+      var scrim = document.getElementById('scrim');
+      function setOpen(open){
+        document.body.classList.toggle('menu-open', open);
+        if(scrim) scrim.hidden = !open;
+        if(btn) btn.setAttribute('aria-expanded', open?'true':'false');
+      }
+      if(btn){ btn.addEventListener('click', function(){ setOpen(!document.body.classList.contains('menu-open')); }); }
+      if(scrim){ scrim.addEventListener('click', function(){ setOpen(false); }); }
+      document.addEventListener('keydown', function(e){ if(e.key==='Escape') setOpen(false); });
+    })();
 
     // ==========================
     //  Recherche (géocodage)
@@ -239,9 +293,7 @@
       function request(){ if(rafId) return; rafId = requestAnimationFrame(draw); }
       map.on('zoomend moveend', request);
       return { request:request };
-    })();
-
-    function scheduleRedraw(){ canvasLayer.request(); updateStats(); updateSelectedStats(); }
+    })();function scheduleRedraw(){ canvasLayer.request(); updateStats(); updateSelectedStats(); }
 
     // ==========================
     //  Stats
@@ -375,7 +427,8 @@
         for(var i=0;i<obj.data.length;i++){ var it=obj.data[i]; var l0=b64ToF32(it.l0); var l5=b64ToF32(it.l5); var levels=new Array(7); levels[0]=l0; levels[1]=l0; levels[2]=l0; levels[3]=l5; levels[4]=l5; levels[5]=l5; levels[6]=l5; var start = (typeof it.d==='number')? it.d : NaN; var end=(typeof it.e==='number')? it.e : NaN; var lenKm = (typeof it.l==='number')? it.l : lengthKmFromFlat(l0); var t={ id:'s-' + Math.random().toString(36).slice(2,8), bbox: it.b, levels: levels, startMs:start, endMs:end, lenKm:lenKm, durationHrs: (Number.isFinite(start)&&Number.isFinite(end)&&end>start)?(end-start)/3600000:NaN }; totalKmAll += t.lenKm; tracks.push(t); }
         rebuildIndex(); scheduleRedraw();
         // Reconstruction complète des niveaux depuis l0 (asynchrone)
-        (async function rebuildLevelsFromL0(){ var prog=document.getElementById('progress'); var msg=document.getElementById('progmsg'); prog.setAttribute('aria-busy','true'); msg.textContent='Reconstruction…'; var batch=40; var done=0; for(var i2=0;i2<tracks.length;i2++){ var t2=tracks[i2]; var base=t2.levels[0]; var coords=new Array(base.length/2); for(var k=0;k<base.length;k+=2){ coords[k/2]=[base[k], base[k+1]]; } var res=await buildLevelsInWorker(coords); if(res && res.ok){ t2.levels = res.levels.map(function(buf){ return new Float32Array(buf); }); t2.bbox = res.bbox; } done++; if(done%batch===0){ msg.textContent='Reconstruction ' + done + '/' + tracks.length; await new Promise(function(r){ return setTimeout(r,0); }); scheduleRedraw(); } } prog.setAttribute('aria-busy','false'); scheduleRedraw(); })();
+        (async function rebuildLevelsFromL0(){ var prog=document.getElementById('progress'); var msg=document.getElementById('progmsg'); prog.setAttribute('aria-busy','true'); msg.textContent='Reconstruction…'; var batch=40; var done=0; for(var i2=0;i2<tracks.length;i2++){ var t2=tracks[i2]; var base=t2.levels[0]; var coords=new Array(base.length/2); for(var k=0;k<base.length;k+=2){ coords[k/2]=[base[k], base[k+1]]; } var res=await buildLevelsInWorker(coords); if(res && res.ok){ t2.levels = res.levels.map(function(buf){ return new Float32Array(buf); }); t2.bbox = res.bbox; } done++; if(done%batch===0){ msg.textContent='Reconstruction ' + done + '/' + tracks.length; await new Promise(function(r){ return setTimeout(r,0); }); scheduleRedraw(); } } prog.setAttribute('aria-busy','false'); scheduleRedraw();
+        })();
       } else { throw new Error('Format snapshot inconnu'); }
     }
 
@@ -384,6 +437,28 @@
       catch(e){ toast('Export impossible'); }
     });
     document.getElementById('import-file-input').addEventListener('change', async function(e){ var f=e.target.files && e.target.files[0]; if(!f) return; try{ var text=await f.text(); var obj=JSON.parse(text); await loadSnapshotObject(obj); toast('Snapshot importé.'); }catch(err){ console.error(err); toast('Import invalide.'); } });
+
+    // Import via URL
+    (function(){
+      var btn = document.getElementById('import-url-btn');
+      var input = document.getElementById('import-url');
+      if(!btn||!input) return;
+      btn.addEventListener('click', async function(){
+        var url = (input.value||'').trim();
+        if(!url) { toast('URL vide'); return; }
+        var prog=document.getElementById('progress'); var msg=document.getElementById('progmsg');
+        try{
+          prog.setAttribute('aria-busy','true'); msg.textContent='Chargement URL…';
+          var r = await fetch(url, { mode:'cors', cache:'no-store' });
+          if(!r.ok) throw new Error('HTTP '+r.status);
+          var obj = await r.json();
+          await loadSnapshotObject(obj);
+          toast('Import URL ok');
+        }catch(e){ console.error(e); toast('Import URL impossible (CORS?)'); }
+        finally{ prog.setAttribute('aria-busy','false'); msg.textContent='Prêt'; }
+      });
+      input.addEventListener('keydown', function(e){ if(e.key==='Enter'){ e.preventDefault(); btn.click(); } });
+    })();
 
     document.getElementById('clear-btn').addEventListener('click', function(){ tracks.length=0; totalKmAll=0; index.map.clear(); selected=null; updateSelectedStats(); scheduleRedraw(); });
 
