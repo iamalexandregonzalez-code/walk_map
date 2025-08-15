@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Mes trajets – Apple Watch (ultra léger)</title>
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    html, body { height:100%; margin:0; background:#0b0f14; color:#e8eef7; font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    #map { position:fixed; inset:0; }
+    .toolbar { position: fixed; top: .75rem; left: 50%; transform: translateX(-50%); z-index: 1000; display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; background: rgba(5,8,12,.6); backdrop-filter: blur(8px); border:1px solid rgba(255,255,255,.08); border-radius: 14px; padding: .5rem .6rem; box-shadow: 0 8px 24px rgba(0,0,0,.35); }
+    .toolbar button, .toolbar label.btn { appearance: none; border:1px solid rgba(255,255,255,.12); background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)); color:#e8eef7; padding:.45rem .7rem; border-radius:10px; font-size:.9rem; cursor:pointer; }
+    .toolbar button:active, .toolbar label.btn:active { transform: translateY(1px); }
+    .toolbar input[type="file"] { display:none; }
+    .toolbar input.search { min-width:220px; max-width:260px; border:1px solid rgba(255,255,255,.12); background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)); color:inherit; padding:.42rem .5rem; border-radius:10px; font-size:.9rem; }
+    .toolbar input[type="date"] { border:1px solid rgba(255,255,255,.12); background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)); color:inherit; padding:.42rem .5rem; border-radius:10px; font-size:.9rem; }
+    .stat { font-size:.8rem; opacity:.85; padding:.2rem .45rem; border:1px solid rgba(255,255,255,.08); border-radius:8px; }
+    .progress { display:none; align-items:center; gap:.5rem; font-size:.85rem; }
+    .progress[aria-busy="true"] { display:flex; }
+
+    .suggestions { position: fixed; z-index:1500; min-width: 200px; max-width: 60vw; max-height: 50vh; overflow:auto; background: rgba(5,8,12,.95); border:1px solid rgba(255,255,255,.12); border-radius:10px; padding:.25rem; display:none; backdrop-filter: blur(6px); }
+    .suggestions[aria-expanded="true"]{ display:block; }
+    .suggestions .item{ padding:.35rem .45rem; border-radius:8px; cursor:pointer; font-size:.9rem; }
+    .suggestions .item:hover{ background: rgba(255,255,255,.08); }
+    body.light .suggestions{ background: rgba(255,255,255,.95); border-color: rgba(0,0,0,.15); }
+    body.light .suggestions .item:hover{ background: rgba(0,0,0,.06); }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="toolbar">
+    <label class="btn" for="file-input">📥 Importer GPX / TCX / JSON</label>
+    <input id="file-input" type="file" accept=".gpx,.tcx,.json" multiple />
+
+    <button id="clear-btn" title="Effacer tout">🧹 Effacer</button>
+    <button id="export-file-btn" title="Exporter en fichier">⬇️ Export</button>
+    <label class="btn" for="import-file-input" title="Importer un snapshot depuis un fichier">⬆️ Import</label>
+    <input id="import-file-input" type="file" accept=".json,application/json" />
+
+    <button id="theme-btn" title="Basculer clair/sombre">☀️/🌙</button>
+
+    <input id="geocode" class="search" type="search" placeholder="Rechercher un lieu (ville, adresse, lat,lon)…" enterkeyhint="search" aria-label="Rechercher un lieu" />
+
+    <input id="dateStart" type="date" title="Date de début" />
+    <input id="dateEnd" type="date" title="Date de fin" />
+
+    <span class="stat" id="count">0 trajets</span>
+    <span class="stat" id="points">0 points</span>
+    <span class="stat" id="kmvis">0 km visibles</span>
+    <span class="stat" id="avgspd">— km/h</span>
+    <span class="stat" id="selstat">Sélection : —</span>
+    <div class="progress" id="progress" aria-busy="false"><span id="progmsg">Import...</span></div>
+  </div>
+
+  <div id="geo-suggest" class="suggestions" hidden></div>
+
+  <script>
+    // ==========================
+    //  Carte (Leaflet) + thèmes clair/sombre
+    // ==========================
+    const darkTiles = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { attribution: '&copy; OpenStreetMap, &copy; CARTO', maxZoom: 20 });
+    const lightTiles = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { attribution: '&copy; OpenStreetMap, &copy; CARTO', maxZoom: 20 });
+    const map = L.map('map', { zoomControl: true, preferCanvas: true, layers:[darkTiles] }).setView([20, 0], 2);
+    let theme = 'dark';
+
+    document.getElementById('theme-btn').addEventListener('click', function(){
+      if(theme==='dark'){
+        map.removeLayer(darkTiles); lightTiles.addTo(map); theme='light';
+        document.body.style.background='#f5f7fb'; document.body.style.color='#0b0f14';
+      } else {
+        map.removeLayer(lightTiles); darkTiles.addTo(map); theme='dark';
+        document.body.style.background='#0b0f14'; document.body.style.color='#e8eef7';
+      }
+      document.body.classList.toggle('light', theme==='light');
+      scheduleRedraw();
+    });
+
+    // ==========================
+    //  Outils UI
+    // ==========================
+    function toast(msg){ var el=document.createElement('div'); el.textContent=msg; el.style.position='fixed'; el.style.left='50%'; el.style.transform='translateX(-50%)'; el.style.bottom='90px'; el.style.zIndex=2000; el.style.background='rgba(5,8,12,.85)'; el.style.color='#e8eef7'; el.style.border='1px solid rgba(255,255,255,.12)'; el.style.padding='.5rem .75rem'; el.style.borderRadius='12px'; el.style.boxShadow='0 8px 24px rgba(0,0,0,.35)'; document.body.appendChild(el); setTimeout(function(){ el.remove(); }, 1800); }
+
+    // ==========================
+    //  Recherche (géocodage)
+    // ==========================
+    var geoInput = document.getElementById('geocode');
+    var geoBox = document.getElementById('geo-suggest');
+    var geoResults = [];
+    var geoAbort = null;
+
+    function placeSuggestUnderInput(){ if(!geoInput) return; var r = geoInput.getBoundingClientRect(); geoBox.style.left = r.left + 'px'; geoBox.style.top = (r.bottom + 6) + 'px'; geoBox.style.width = r.width + 'px'; }
+    window.addEventListener('resize', placeSuggestUnderInput);
+
+    function showSuggest(items){
+      geoResults = items;
+      if(items.length===0){ hideSuggest(); return; }
+      placeSuggestUnderInput();
+      geoBox.innerHTML = '';
+      for(var i=0;i<items.length;i++){
+        var div=document.createElement('div');
+        div.className='item';
+        div.dataset.i=String(i);
+        div.textContent=items[i].label;
+        geoBox.appendChild(div);
+      }
+      geoBox.hidden = false; geoBox.setAttribute('aria-expanded','true');
+    }
+    function hideSuggest(){ geoBox.hidden = true; geoBox.removeAttribute('aria-expanded'); }
+    geoBox.addEventListener('mousedown', function(e){ var el=e.target.closest('.item'); if(!el) return; pickResult(parseInt(el.dataset.i,10)); });
+
+    function pickResult(i){ var it = geoResults[i]; if(!it) return; if(it.bbox && it.bbox.length===4){ var bb=it.bbox.map(Number); var s=bb[0], n=bb[1], w=bb[2], e=bb[3]; map.fitBounds([[s,w],[n,e]]); } else { map.setView([it.lat, it.lon], 13); } hideSuggest(); }
+
+    function debounce(fn, ms){ var t; return function(){ var args=arguments; clearTimeout(t); t=setTimeout(function(){ fn.apply(null, args); }, ms); }; }
+
+    async function geocodeQuery(q){
+      var m = q.trim().match(/^(-?\d+(?:\.\d+)?)[,\s]+(-?\d+(?:\.\d+)?)$/);
+      if(m){ var lat=parseFloat(m[1]), lon=parseFloat(m[2]); if(Number.isFinite(lat)&&Number.isFinite(lon)){ map.setView([lat,lon], 13); hideSuggest(); return; } }
+      if(geoAbort) geoAbort.abort();
+      geoAbort = new AbortController();
+      try{
+        var url = 'https://nominatim.openstreetmap.org/search?format=json&limit=8&addressdetails=1&accept-language=fr&q=' + encodeURIComponent(q);
+        var r = await fetch(url, { signal: geoAbort.signal, headers: { 'Accept-Language':'fr' } });
+        if(!r.ok) throw new Error('nominatim');
+        var data = await r.json();
+        showSuggest(data.map(function(d){ return { label:d.display_name, lat:parseFloat(d.lat), lon:parseFloat(d.lon), bbox:d.boundingbox? d.boundingbox.map(Number): null }; }));
+      }catch(e){
+        try{
+          var r2 = await fetch('https://photon.komoot.io/api/?q='+encodeURIComponent(q)+'&lang=fr&limit=8', { signal: geoAbort.signal });
+          var data2 = r2.ok ? await r2.json() : { features:[] };
+          var items = data2.features.map(function(f){ return { label:(f.properties.name||'') + (f.properties.city? ', '+f.properties.city : (f.properties.country? ', '+f.properties.country:'')), lat:f.geometry.coordinates[1], lon:f.geometry.coordinates[0], bbox:null }; });
+          showSuggest(items);
+        }catch(_){ hideSuggest(); }
+      }
+    }
+
+    var onGeoInput = debounce(function(){ var q=geoInput.value.trim(); if(q.length<2){ hideSuggest(); return; } geocodeQuery(q); }, 350);
+    geoInput.addEventListener('input', onGeoInput);
+    geoInput.addEventListener('focus', function(){ if(geoResults.length){ placeSuggestUnderInput(); geoBox.hidden=false; geoBox.setAttribute('aria-expanded','true'); } });
+    geoInput.addEventListener('keydown', function(e){ if(e.key==='Enter'){ e.preventDefault(); if(geoResults.length) pickResult(0); else geocodeQuery(geoInput.value); } else if(e.key==='Escape'){ hideSuggest(); } });
+    document.addEventListener('click', function(e){ if(e.target!==geoInput && !geoBox.contains(e.target)) hideSuggest(); });
+
+    // ==========================
+    //  Données + Index spatial (grille locale) + Filtres de dates
+    // ==========================
+    var tracks = []; // { id, bbox:[s,n,w,e], levels:Float32Array[], startMs, endMs, lenKm, durationHrs }
+    var totalKmAll = 0;
+
+    var selected = null;
+
+    function GridIndex(cellDeg){ this.c=cellDeg||0.5; this.map=new Map(); }
+    GridIndex.prototype.key=function(gx,gy){ return gx+','+gy; };
+    GridIndex.prototype.add=function(i, bbox){ var s=bbox[0], n=bbox[1], w=bbox[2], e=bbox[3]; var c=this.c; var gx0=Math.floor(w/c), gx1=Math.floor(e/c); var gy0=Math.floor(s/c), gy1=Math.floor(n/c); for(var gx=gx0; gx<=gx1; gx++){ for(var gy=gy0; gy<=gy1; gy++){ var k=this.key(gx,gy); var set=this.map.get(k); if(!set){ set=new Set(); this.map.set(k,set); } set.add(i); } } };
+    GridIndex.prototype.build=function(items){ this.map.clear(); for(var i=0;i<items.length;i++) this.add(i, items[i].bbox); };
+    GridIndex.prototype.search=function(minX,minY,maxX,maxY){ var c=this.c; var gx0=Math.floor(minX/c), gx1=Math.floor(maxX/c); var gy0=Math.floor(minY/c), gy1=Math.floor(maxY/c); var out=new Set(); for(var gx=gx0; gx<=gx1; gx++){ for(var gy=gy0; gy<=gy1; gy++){ var set=this.map.get(this.key(gx,gy)); if(set) for(var _i of set) out.add(_i); } } return Array.from(out); };
+
+    var index = new GridIndex(0.5);
+
+    // Filtres de dates
+    var inpStart = document.getElementById('dateStart');
+    var inpEnd   = document.getElementById('dateEnd');
+    var dateStartMs = null, dateEndMs = null;
+    function updateDateFilters(){
+      dateStartMs = inpStart.value ? (new Date(inpStart.value).getTime()) : null;
+      dateEndMs   = inpEnd.value   ? (new Date(inpEnd.value).getTime() + 86399999) : null; // fin de journée incluse
+      computeGlobalBBox();
+      if(selected && !passesDate(selected)){ selected=null; updateSelectedStats(); }
+      scheduleRedraw();
+    }
+    inpStart.addEventListener('change', updateDateFilters);
+    inpEnd.addEventListener('change', updateDateFilters);
+    function passesDate(t){ if(dateStartMs==null && dateEndMs==null) return true; var d=t.startMs; if(!Number.isFinite(d)) return false; if(dateStartMs!=null && d<dateStartMs) return false; if(dateEndMs!=null && d>dateEndMs) return false; return true; }
+
+    function rebuildIndex(){ index.build(tracks); computeGlobalBBox(); }
+
+    // ==========================
+    //  Niveaux / style
+    // ==========================
+    function levelForZoom(z){ return (z>=16)?0 : (z>=14)?1 : (z>=12)?2 : (z>=10)?3 : (z>=8)?4 : (z>=6)?5 : 6; }
+    function strokeWidthForZoom(z){ if(z>=16) return 0.8; if(z>=14) return 0.95; if(z>=12) return 1.1; if(z>=10) return 1.3; if(z>=8) return 1.5; return 1.6; }
+    function strokeAlphaForZoom(z){ if(z>=16) return 0.95; if(z>=14) return 0.9; if(z>=12) return 0.8; if(z>=10) return 0.7; return 0.6; }
+
+    // ==========================
+    //  Rendu Canvas custom
+    // ==========================
+    var canvasLayer = (function(){
+      var layer = L.canvas({ padding: 0.2 });
+      layer.addTo(map);
+      var rafId = null;
+      function draw(){
+        rafId = null;
+        var ctx = layer._ctx; if(!ctx) return;
+        var canvas = layer._container; ctx.clearRect(0,0,canvas.width,canvas.height);
+        var z = map.getZoom(); var lvl = levelForZoom(z); var weight = strokeWidthForZoom(z); var alpha = strokeAlphaForZoom(z);
+        var b = map.getBounds(); var minX=b.getWest(), minY=b.getSouth(), maxX=b.getEast(), maxY=b.getNorth();
+
+        var candidates = (index.map && index.map.size>0) ? index.search(minX, minY, maxX, maxY) : tracks.map(function(_,i){return i;});
+        ctx.lineJoin='round'; ctx.lineCap='round'; var __prevComp=ctx.globalCompositeOperation; if(z<=10) ctx.globalCompositeOperation='lighter';
+        for(var ci=0; ci<candidates.length; ci++){
+          var i=candidates[ci];
+          var t = tracks[i];
+          if(!t || !passesDate(t)) continue;
+          var flat=t.levels[lvl]||t.levels[t.levels.length-1];
+          if(!flat||flat.length<4) continue;
+          ctx.strokeStyle= theme==='dark' ? '#79f7ff' : '#0057b8';
+          ctx.globalAlpha=alpha; ctx.lineWidth=weight;
+          var first=true;
+          for(var k=0;k<flat.length;k+=2){
+            var p = map.latLngToLayerPoint([flat[k], flat[k+1]]);
+            if(first){ ctx.beginPath(); ctx.moveTo(p.x,p.y); first=false; } else { ctx.lineTo(p.x,p.y); }
+          }
+          ctx.stroke();
+          ctx.globalAlpha=Math.max(0.08, alpha*0.25); ctx.lineWidth=weight + (z>=14?0.5:1.5); ctx.strokeStyle= theme==='dark' ? '#00ffff' : '#0075ff'; ctx.stroke();
+        }
+        ctx.globalCompositeOperation=__prevComp;
+        if(selected && passesDate(selected)){
+          var flatSel = (selected.levels[lvl]||selected.levels[selected.levels.length-1]);
+          if(flatSel && flatSel.length>=4){
+            var first=true; // halo
+            ctx.globalAlpha = Math.min(1, alpha+0.15);
+            ctx.lineWidth = weight + 2.5;
+            ctx.strokeStyle = (theme==='dark' ? '#ffd166' : '#b26b00');
+            for(var kk=0; kk<flatSel.length; kk+=2){
+              var ps = map.latLngToLayerPoint([flatSel[kk], flatSel[kk+1]]);
+              if(first){ ctx.beginPath(); ctx.moveTo(ps.x, ps.y); first=false; } else { ctx.lineTo(ps.x, ps.y); }
+            }
+            ctx.stroke();
+            // core
+            ctx.globalAlpha = 1.0;
+            ctx.lineWidth = Math.max(1, weight + 0.8);
+            ctx.strokeStyle = (theme==='dark' ? '#ffe08a' : '#cc8f00');
+            ctx.stroke();
+          }
+        }
+        updateVisibleStats(lvl);
+      }
+      function request(){ if(rafId) return; rafId = requestAnimationFrame(draw); }
+      map.on('zoomend moveend', request);
+      return { request:request };
+    })();
+
+    function scheduleRedraw(){ canvasLayer.request(); updateStats(); updateSelectedStats(); }
+
+    // ==========================
+    //  Stats
+    // ==========================
+    function updateStats(){ var lvl=levelForZoom(map.getZoom()); var pts=0; for(var i=0;i<tracks.length;i++){ var t=tracks[i]; var f=t.levels[lvl]||t.levels[t.levels.length-1]; pts += (f ? f.length : 0)/2; } document.getElementById('count').textContent = tracks.length + ' trajets'; document.getElementById('points').textContent = pts.toLocaleString('fr-FR') + ' points'; }
+
+    function haversineKm(lat1,lon1,lat2,lon2){ var R=6371; var toRad=function(x){return x*Math.PI/180;}; var dLat=toRad(lat2-lat1), dLon=toRad(lon2-lon1); var a=Math.sin(dLat/2)*Math.sin(dLat/2) + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)*Math.sin(dLon/2); return 2*R*Math.asin(Math.sqrt(a)); }
+    function lengthKmFromFlat(flat){ var s=0; for(var k=2;k<flat.length;k+=2){ s += haversineKm(flat[k-2],flat[k-1],flat[k],flat[k+1]); } return s; }
+
+    function updateVisibleStats(lvl){
+      var b=map.getBounds(); var minX=b.getWest(), minY=b.getSouth(), maxX=b.getEast(), maxY=b.getNorth();
+      var cand = (index.map && index.map.size>0) ? index.search(minX,minY,maxX,maxY) : tracks.map(function(_,i){return i;});
+      var sumKm=0; var sumTimeHrs=0;
+      for(var ci=0; ci<cand.length; ci++){
+        var i=cand[ci]; var t=tracks[i]; if(!t || !passesDate(t)) continue; var flat=t.levels[lvl]||t.levels[t.levels.length-1]; if(!flat||flat.length<4) continue; var vis=0; for(var k=2;k<flat.length;k+=2){ var lat1=flat[k-2], lon1=flat[k-1], lat2=flat[k], lon2=flat[k+1]; var midLat=(lat1+lat2)/2, midLon=(lon1+lon2)/2; if(midLat>=minY&&midLat<=maxY&&midLon>=minX&&midLon<=maxX){ vis += haversineKm(lat1,lon1,lat2,lon2); } } if(vis>0){ sumKm+=vis; if(Number.isFinite(t.durationHrs) && t.lenKm>0){ sumTimeHrs += t.durationHrs * (vis / t.lenKm); } }
+      }
+      var elKm=document.getElementById('kmvis'); if(elKm) elKm.textContent = Math.round(sumKm).toLocaleString('fr-FR') + ' km visibles';
+      var elSp=document.getElementById('avgspd'); if(elSp) elSp.textContent = (sumTimeHrs>0)? (sumKm/sumTimeHrs).toFixed(1) + ' km/h' : '— km/h';
+    }
+
+    function computeGlobalBBox(){ /* no-op for fit; kept for extension */ }
+
+    // ==========================
+    //  Sélection (click) & hit-test
+    // ==========================
+    function pointSegDist2(px,py,ax,ay,bx,by){ var vx=bx-ax, vy=by-ay; var denom=vx*vx+vy*vy; if(denom===0){ var dx=px-ax, dy=py-ay; return dx*dx+dy*dy; } var t=((px-ax)*vx+(py-ay)*vy)/denom; if(t<0)t=0; else if(t>1)t=1; var qx=ax+t*vx, qy=ay+t*vy; var dx2=px-qx, dy2=py-qy; return dx2*dx2+dy2*dy2; }
+    function findTrackNear(latlng){ var tol=8; var p = map.latLngToLayerPoint(latlng); var ll0 = map.layerPointToLatLng(L.point(p.x - tol, p.y - tol)); var ll1 = map.layerPointToLatLng(L.point(p.x + tol, p.y + tol)); var minX=Math.min(ll0.lng,ll1.lng), maxX=Math.max(ll0.lng,ll1.lng), minY=Math.min(ll0.lat,ll1.lat), maxY=Math.max(ll0.lat,ll1.lat); var ids = (index.map && index.map.size>0) ? index.search(minX,minY,maxX,maxY) : tracks.map(function(_,i){return i;}); var z = map.getZoom(); var lvl = Math.max(0, levelForZoom(z)-1); var best=null, bestD2=tol*tol; for(var ii=0; ii<ids.length; ii++){ var t = tracks[ids[ii]]; if(!t || !passesDate(t)) continue; var flat = t.levels[lvl] || t.levels[0]; if(!flat || flat.length<4) continue; var prev = map.latLngToLayerPoint([flat[0], flat[1]]); for(var k=2; k<flat.length; k+=2){ var cur = map.latLngToLayerPoint([flat[k], flat[k+1]]); var d2 = pointSegDist2(p.x,p.y, prev.x,prev.y, cur.x,cur.y); if(d2 < bestD2){ bestD2=d2; best=t; } prev = cur; } } return best; }
+    function updateSelectedStats(){ var el=document.getElementById('selstat'); if(!el){ return; } if(!selected || !passesDate(selected)){ el.textContent='Sélection : —'; return; } var km = (selected.lenKm ? selected.lenKm : lengthKmFromFlat(selected.levels[Math.min(4, selected.levels.length-1)])).toFixed(1); var spd = (Number.isFinite(selected.durationHrs) && selected.durationHrs>0) ? (selected.lenKm/selected.durationHrs).toFixed(1)+' km/h' : '— km/h'; var date = (Number.isFinite(selected.startMs)) ? (new Date(selected.startMs)).toLocaleDateString('fr-FR') : ''; el.textContent = 'Sélection : ' + km + ' km' + ' • ' + spd + (date ? ' • ' + date : ''); }
+    map.on('click', function(e){ var t = findTrackNear(e.latlng); selected = t || null; updateSelectedStats(); scheduleRedraw(); });
+
+    // ==========================
+    //  Parsing GPX/TCX
+    // ==========================
+    function parseGPXWithTimes(text){ var doc = new DOMParser().parseFromString(text, 'application/xml'); var trkpts = Array.from(doc.getElementsByTagName('trkpt')); var coords = []; var firstMs=NaN; var lastMs=NaN; for(var i=0;i<trkpts.length;i++){ var pt=trkpts[i]; var lat = parseFloat(pt.getAttribute('lat')); var lon = parseFloat(pt.getAttribute('lon')); if(Number.isFinite(lat)&&Number.isFinite(lon)) coords.push([lat,lon]); var te=pt.getElementsByTagName('time')[0]; if(te){ var d = Date.parse(te.textContent? te.textContent.trim(): ''); if(Number.isFinite(d)){ if(!Number.isFinite(firstMs)) firstMs=d; lastMs=d; } } } return { coords:coords, startMs:firstMs, endMs:lastMs }; }
+    function parseTCX(text){ var doc = new DOMParser().parseFromString(text, 'application/xml'); var pts = Array.from(doc.getElementsByTagName('Trackpoint')); var coords = []; var firstMs=NaN; var lastMs=NaN; for(var i=0;i<pts.length;i++){ var p=pts[i]; var la=p.getElementsByTagName('LatitudeDegrees')[0]; var lo=p.getElementsByTagName('LongitudeDegrees')[0]; if(la&&lo){ var lat=parseFloat(la.textContent); var lon=parseFloat(lo.textContent); if(Number.isFinite(lat)&&Number.isFinite(lon)) coords.push([lat,lon]); } var t=p.getElementsByTagName('Time')[0]; if(t){ var d=Date.parse(t.textContent? t.textContent.trim(): ''); if(Number.isFinite(d)){ if(!Number.isFinite(firstMs)) firstMs=d; lastMs=d; } } } return { coords:coords, startMs:firstMs, endMs:lastMs }; }
+
+    // ==========================
+    //  Web Worker (simplification + pyramide)
+    // ==========================
+    var workerURL = URL.createObjectURL(new Blob([`\
+      function dpSimplifyFlat(flat, tol){ const n=flat.length/2; if(n<=2||tol<=0) return flat; const sqTol=tol*tol; const keep=new Uint8Array(n); keep[0]=1; keep[n-1]=1; const stack=[[0,n-1]]; while(stack.length){ const [s,e]=stack.pop(); const ax=flat[2*s], ay=flat[2*s+1], bx=flat[2*e], by=flat[2*e+1]; const vx=bx-ax, vy=by-ay; const vlen=vx*vx+vy*vy || 1; let maxd=0, idx=0; for(let i=s+1;i<e;i++){ const px=flat[2*i], py=flat[2*i+1]; let t=((px-ax)*vx+(py-ay)*vy)/vlen; if(t<0)t=0; else if(t>1)t=1; const qx=ax+t*vx, qy=ay+t*vy; const dx=px-qx, dy=py-qy; const d=dx*dx+dy*dy; if(d>maxd){ maxd=d; idx=i; } } if(maxd>sqTol){ keep[idx]=1; stack.push([s,idx],[idx,e]); } } let m=0; for(let i=0;i<n;i++) if(keep[i]) m++; const out=new Float32Array(m*2); let j=0; for(let i=0;i<n;i++) if(keep[i]){ out[2*j]=flat[2*i]; out[2*j+1]=flat[2*i+1]; j++; } return out; }\
+      function toFlat(coords){ const out=new Float32Array(coords.length*2); for(let i=0;i<coords.length;i++){ out[2*i]=coords[i][0]; out[2*i+1]=coords[i][1]; } return out; }\
+      function bboxFromFlat(flat){ let s=flat[0], n=flat[0], w=flat[1], e=flat[1]; for(let i=2;i<flat.length;i+=2){ const lat=flat[i], lng=flat[i+1]; if(lat<s) s=lat; if(lat>n) n=lat; if(lng<w) w=lng; if(lng>e) e=lng; } return [s,n,w,e]; }\
+      onmessage = (e)=>{\
+        const { id, coords, scale=0.6, maxPts=40000 } = e.data;\
+        try{\
+          let flat = toFlat(coords);\
+          const n=flat.length/2; if(n>maxPts){ const step=Math.ceil(n/maxPts); const tmp=new Float32Array(Math.ceil(n/step)*2); let j=0; for(let i=0;i<n;i+=step){ tmp[2*j]=flat[2*i]; tmp[2*j+1]=flat[2*i+1]; j++; } flat=tmp; }\
+          const BASE=[2,5,12,30,75,180,400];\
+          const TOLS = BASE.map(m=> (m*scale)/111000);\
+          const levels=new Array(TOLS.length);\
+          let l0 = dpSimplifyFlat(flat, TOLS[0]); if(l0.buffer===flat.buffer) l0 = l0.slice(); levels[0]=l0;\
+          let cur = dpSimplifyFlat(flat, TOLS[1]); if(cur.buffer===flat.buffer) cur = cur.slice(); levels[1]=cur;\
+          for(let i=2;i<TOLS.length;i++){ let nxt=dpSimplifyFlat(cur, TOLS[i]); if(nxt.buffer===cur.buffer) nxt=nxt.slice(); levels[i]=nxt; cur=nxt; }\
+          const bbox=bboxFromFlat(levels[levels.length-1]);\
+          const buffers=[]; const seen=new Set();\
+          for(const arr of levels){ let buf=arr.buffer; if(seen.has(buf)){ const copy=arr.slice(); buf=copy.buffer; } seen.add(buf); buffers.push(buf); }\
+          postMessage({ id, ok:true, levels: buffers, bbox }, buffers);\
+        }catch(err){ postMessage({ id, ok:false, error:String(err&&err.message||err) }); }\
+      };\
+    `], { type: 'application/javascript' }));
+    var worker = new Worker(workerURL);
+    var pending = new Map();
+    worker.onmessage = function(e){ var id = e.data.id; var cb=pending.get(id); if(cb){ pending.delete(id); cb(e.data); } };
+    function buildLevelsInWorker(coords){ return new Promise(function(resolve){ var id = 'b-' + Math.random().toString(36).slice(2,9); pending.set(id, resolve); worker.postMessage({ id: id, coords: coords }); }); }
+
+    // ==========================
+    //  Import fichiers (drag & drop ou bouton)
+    // ==========================
+    async function handleFiles(files){
+      var prog = document.getElementById('progress'); var progmsg=document.getElementById('progmsg');
+      prog.setAttribute('aria-busy','true');
+      var done=0; var total = files.length; var batch=40; var imported=0;
+      for(var i=0;i<files.length;i++){
+        var file=files[i];
+        progmsg.textContent = 'Import ' + (++done) + '/' + total + ' – ' + file.name;
+        try{ await importOne(file); imported++; } catch(e){ if(imported<3) toast('Erreur import ' + file.name); }
+        if(done%batch===0) await new Promise(function(r){ return setTimeout(r,0); });
+      }
+      rebuildIndex();
+      prog.setAttribute('aria-busy','false');
+      toast(imported + ' fichiers traités.');
+      scheduleRedraw();
+    }
+
+    async function importOne(file){
+      var text = await file.text();
+      var coords = [], startMs = Number.isFinite(file.lastModified)? file.lastModified : NaN, endMs=NaN;
+      try{
+        var name = file.name.toLowerCase();
+        if(name.endsWith('.gpx')){ var r1=parseGPXWithTimes(text); coords=r1.coords; if(Number.isFinite(r1.startMs)) startMs=r1.startMs; if(Number.isFinite(r1.endMs)) endMs=r1.endMs; }
+        else if(name.endsWith('.tcx')){ var r2=parseTCX(text); coords=r2.coords; if(Number.isFinite(r2.startMs)) startMs=r2.startMs; if(Number.isFinite(r2.endMs)) endMs=r2.endMs; }
+        else if(name.endsWith('.json')){
+          var obj=JSON.parse(text);
+          if(obj.type==='FeatureCollection'){
+            for(var j=0;j<obj.features.length;j++){ var f=obj.features[j]; if(f.geometry && f.geometry.type==='LineString'){ var c=f.geometry.coordinates.map(function(p){ return [p[1], p[0]]; }); await addTrackBuilt(c, startMs, endMs); } }
+            return;
+          } else if(obj.type==='LineString'){ coords = obj.coordinates.map(function(p){ return [p[1], p[0]]; }); }
+        }
+      }catch(err){ console.warn('Parse failed:', file.name, err); return; }
+      if(coords.length>1) await addTrackBuilt(coords, startMs, endMs);
+    }
+
+    document.getElementById('file-input').addEventListener('change', function(e){ handleFiles(e.target.files); });
+    document.addEventListener('dragover', function(e){ e.preventDefault(); });
+    document.addEventListener('drop', function(e){ e.preventDefault(); handleFiles(e.dataTransfer.files); });
+
+    async function addTrackBuilt(coords, startMs, endMs){
+      var res = await buildLevelsInWorker(coords);
+      if(!res || !res.ok) { console.warn('Worker failed:', res && res.error); return; }
+      var levels = res.levels.map(function(buf){ return new Float32Array(buf); });
+      var t={ id:'t-' + Math.random().toString(36).slice(2,8), bbox: res.bbox, levels: levels, startMs: Number.isFinite(startMs)? startMs : NaN, endMs: Number.isFinite(endMs)? endMs : NaN };
+      var lvlForLen = Math.min(4, levels.length-1);
+      t.lenKm = (function(flat){ var s=0; for(var k=2;k<flat.length;k+=2){ s += haversineKm(flat[k-2],flat[k-1],flat[k],flat[k+1]); } return s; })(levels[lvlForLen]);
+      t.durationHrs = (Number.isFinite(t.startMs) && Number.isFinite(t.endMs) && t.endMs>t.startMs) ? (t.endMs - t.startMs)/3600000 : NaN;
+      totalKmAll += t.lenKm;
+      tracks.push(t);
+      if(tracks.length===1 || tracks.length%250===0) rebuildIndex();
+      scheduleRedraw();
+    }
+
+    // ==========================
+    //  Export / Import fichier (snapshot fidèle)
+    // ==========================
+    function f32ToB64(f32){ var u8=new Uint8Array(f32.buffer); var bin=''; var CH=0x8000; for(var i=0;i<u8.length;i+=CH){ bin += String.fromCharCode.apply(null, u8.subarray(i,i+CH)); } return btoa(bin); }
+    function b64ToF32(b64){ var bin=atob(b64); var len=bin.length; var u8=new Uint8Array(len); for(var i=0;i<len;i++) u8[i]=bin.charCodeAt(i); return new Float32Array(u8.buffer); }
+    function buildSnapshotV3(){ var payload = tracks.map(function(t){ var l0=t.levels[0]; var l5=t.levels[Math.min(5, t.levels.length-1)]; return { b:t.bbox, d:(Number.isFinite(t.startMs)?t.startMs:null), e:(Number.isFinite(t.endMs)?t.endMs:null), l: Math.round(t.lenKm*1000)/1000, l0: f32ToB64(l0), l5: f32ToB64(l5) }; }); return { v:3, enc:'b64f32', data: payload }; }
+    async function loadSnapshotObject(obj){
+      tracks.length=0; totalKmAll=0;
+      if(obj && obj.v===3 && obj.enc==='b64f32'){
+        for(var i=0;i<obj.data.length;i++){ var it=obj.data[i]; var l0=b64ToF32(it.l0); var l5=b64ToF32(it.l5); var levels=new Array(7); levels[0]=l0; levels[1]=l0; levels[2]=l0; levels[3]=l5; levels[4]=l5; levels[5]=l5; levels[6]=l5; var start = (typeof it.d==='number')? it.d : NaN; var end=(typeof it.e==='number')? it.e : NaN; var lenKm = (typeof it.l==='number')? it.l : lengthKmFromFlat(l0); var t={ id:'s-' + Math.random().toString(36).slice(2,8), bbox: it.b, levels: levels, startMs:start, endMs:end, lenKm:lenKm, durationHrs: (Number.isFinite(start)&&Number.isFinite(end)&&end>start)?(end-start)/3600000:NaN }; totalKmAll += t.lenKm; tracks.push(t); }
+        rebuildIndex(); scheduleRedraw();
+        // Reconstruction complète des niveaux depuis l0 (asynchrone)
+        (async function rebuildLevelsFromL0(){ var prog=document.getElementById('progress'); var msg=document.getElementById('progmsg'); prog.setAttribute('aria-busy','true'); msg.textContent='Reconstruction…'; var batch=40; var done=0; for(var i2=0;i2<tracks.length;i2++){ var t2=tracks[i2]; var base=t2.levels[0]; var coords=new Array(base.length/2); for(var k=0;k<base.length;k+=2){ coords[k/2]=[base[k], base[k+1]]; } var res=await buildLevelsInWorker(coords); if(res && res.ok){ t2.levels = res.levels.map(function(buf){ return new Float32Array(buf); }); t2.bbox = res.bbox; } done++; if(done%batch===0){ msg.textContent='Reconstruction ' + done + '/' + tracks.length; await new Promise(function(r){ return setTimeout(r,0); }); scheduleRedraw(); } } prog.setAttribute('aria-busy','false'); scheduleRedraw(); })();
+      } else { throw new Error('Format snapshot inconnu'); }
+    }
+
+    document.getElementById('export-file-btn').addEventListener('click', function(){
+      try{ var obj = buildSnapshotV3(); var blob = new Blob([JSON.stringify(obj)], {type:'application/json'}); var url=URL.createObjectURL(blob); var a=document.createElement('a'); a.href=url; a.download = 'aw_snapshot_v3_' + new Date().toISOString().slice(0,10) + '.json'; document.body.appendChild(a); a.click(); setTimeout(function(){ URL.revokeObjectURL(url); a.remove(); }, 1000); }
+      catch(e){ toast('Export impossible'); }
+    });
+    document.getElementById('import-file-input').addEventListener('change', async function(e){ var f=e.target.files && e.target.files[0]; if(!f) return; try{ var text=await f.text(); var obj=JSON.parse(text); await loadSnapshotObject(obj); toast('Snapshot importé.'); }catch(err){ console.error(err); toast('Import invalide.'); } });
+
+    document.getElementById('clear-btn').addEventListener('click', function(){ tracks.length=0; totalKmAll=0; index.map.clear(); selected=null; updateSelectedStats(); scheduleRedraw(); });
+
+    // ==========================
+    //  Démarrage
+    // ==========================
+    scheduleRedraw();
+  </script>
+</body>
+</html>
